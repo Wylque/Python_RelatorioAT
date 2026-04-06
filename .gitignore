@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+desktop.ini
+entrada/
+saida/
+.vscode/
