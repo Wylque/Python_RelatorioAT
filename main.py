@@ -21,11 +21,24 @@ from pptx.util import Pt
 # CONFIGURACOES DE ENTRADA - EDITE SOMENTE ESTA SECAO
 # =========================================================
 DATA_EVENTO = "01/04/2026"            # DD/MM/AAAA - data base para localizar o evento no HIS/SER
-IED         = "PCA 12M1"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
+IED         = "NZA 12M7"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
 COMENTARIO_BREVE = (
-    "Ocorrencia com curto-circuito trifasico e atuacao da funcao 50P1T, "
+    "Ocorrencia com curto-circuito MONOFÁSICO e atuacao da funcao 51G1T, "
     "seguida de abertura adequada do disjuntor."
 )
+
+# =========================================================
+# Parametros manuais para calculo do tempo esperado da funcao 51.
+# Valores em corrente primaria (A). O script aplica fase para 51P* e neutro para 51G*/51N*.
+# =========================================================
+PICKUP_FASE_51P = 402
+CURVA_FASE_51P = "C2"
+DIAL_FASE_51P = "0.20"
+
+PICKUP_NEUTRO_51G = 30
+CURVA_NEUTRO_51G = "C2"
+DIAL_NEUTRO_51G = "0.90"
+
 
 # Pasta raiz do projeto. Se preferir, altere para outro caminho absoluto do Windows.
 PASTA_PROJETO = Path(__file__).resolve().parent
@@ -38,16 +51,6 @@ ARQUIVO_TXT = None                     # Ex.: "PCA 12M1__10.75.39.69__02-04-2026
 ARQUIVO_TEMPLATE_PPTX = None           # Ex.: "ANA AT XXX-26 - MODELO.pptx"
 ARQUIVO_OSCILOGRAFIA = None            # Ex.: "PCA 12M1 - 1 - SEL-751 - 01_04_2026 - 16_02_23_950 - ABC T.png"
 ARQUIVO_OSCILOGRAFIA_CEV = None        # Ex.: "PCA 12M1 - 1 - SEL-751 - 01_04_2026 - 16_02_23_950 - ABC T.CEV"
-
-# Parametros manuais para calculo do tempo esperado da funcao 51.
-# Valores em corrente primaria (A). O script aplica fase para 51P* e neutro para 51G*/51N*.
-PICKUP_FASE_51P = 510
-CURVA_FASE_51P = "C1"
-DIAL_FASE_51P = "0.05"
-
-PICKUP_NEUTRO_51G = 60
-CURVA_NEUTRO_51G = "C1"
-DIAL_NEUTRO_51G = "0.12"
 
 # Se True, grava um JSON com todos os dados calculados na pasta de saida.
 GERAR_JSON_RESUMO = True
@@ -310,6 +313,52 @@ def extract_currents_from_cev_file(cev_path: Path) -> Dict[str, float]:
     )
 
 
+def extract_cev_event_location_and_currents(cev_path: Path) -> Dict[str, Any]:
+    with cev_path.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
+        rows = list(csv.reader(fh))
+
+    wanted = ("IA(A)", "IB(A)", "IC(A)", "IG(A)", "EVENT", "LOCATION")
+
+    for idx, row in enumerate(rows):
+        header = [cell.strip().upper() for cell in row]
+        if not all(name in header for name in wanted):
+            continue
+
+        col_idx = {name: header.index(name) for name in wanted}
+        max_idx = max(col_idx.values())
+
+        for data_row in rows[idx + 1:]:
+            if not data_row or len(data_row) <= max_idx:
+                continue
+            try:
+                ia = float(data_row[col_idx["IA(A)"]].strip().replace(",", "."))
+                ib = float(data_row[col_idx["IB(A)"]].strip().replace(",", "."))
+                ic = float(data_row[col_idx["IC(A)"]].strip().replace(",", "."))
+                ig = float(data_row[col_idx["IG(A)"]].strip().replace(",", "."))
+            except ValueError:
+                continue
+
+            event = data_row[col_idx["EVENT"]].strip()
+            location_raw = data_row[col_idx["LOCATION"]].strip()
+            try:
+                location = f"{float(location_raw.replace(',', '.')):.2f}"
+            except ValueError:
+                location = location_raw
+
+            return {
+                "IA": ia,
+                "IB": ib,
+                "IC": ic,
+                "IG": ig,
+                "EVENT": event,
+                "LOCATION": location,
+            }
+
+    raise ValueError(
+        "Nao foi possivel localizar colunas IA(A), IB(A), IC(A), IG(A), EVENT e LOCATION com dados validos no arquivo CEV."
+    )
+
+
 
 def format_currents_text(currents: Dict[str, float]) -> str:
     return (
@@ -406,17 +455,20 @@ def calculate_expected_time(
     settings: Dict[str, str],
     protection: str,
     his_current_primary: float,
-    osc_currents: Optional[Dict[str, float]] = None,
+    cev_currents: Optional[Dict[str, float]] = None,
 ) -> Optional[float]:
     def parse_num(value: Any) -> float:
         return float(str(value).strip().replace(",", "."))
 
-    def pick_fault_current_for_51() -> float:
-        if osc_currents:
-            if protection.startswith("51P"):
-                return max(osc_currents["IA"], osc_currents["IB"], osc_currents["IC"])
-            if protection.startswith(("51G", "51N")):
-                return osc_currents["IG"]
+    def pick_fault_current_for_51_from_cev() -> float:
+        if protection.startswith("51P"):
+            if cev_currents:
+                return max(cev_currents["IA"], cev_currents["IB"], cev_currents["IC"])
+            return his_current_primary
+        if protection.startswith(("51G", "51N")):
+            if cev_currents:
+                return cev_currents["IG"]
+            return his_current_primary
         return his_current_primary
 
     base = normalize_protection_pick_base(protection)
@@ -429,12 +481,12 @@ def calculate_expected_time(
             pickup = parse_num(PICKUP_FASE_51P)
             curve = CURVA_FASE_51P
             dial = parse_num(DIAL_FASE_51P)
-            fault_current = pick_fault_current_for_51()
+            fault_current = pick_fault_current_for_51_from_cev()
         elif protection.startswith(("51G", "51N")):
             pickup = parse_num(PICKUP_NEUTRO_51G)
             curve = CURVA_NEUTRO_51G
             dial = parse_num(DIAL_NEUTRO_51G)
-            fault_current = pick_fault_current_for_51()
+            fault_current = pick_fault_current_for_51_from_cev()
         else:
             ctr = float(settings.get("CTR", "1"))
             fault_current_secondary = his_current_primary / ctr
@@ -881,14 +933,25 @@ def build_data(
 
     reclose = "SIM" if settings.get("E79", "OFF") != "OFF" else "NA (SEM RELIGAMENTO)"
     efloc_enabled = settings.get("EFLOC", "N") == "Y"
-    fault_distance = his_row.locat if efloc_enabled else "NA"
 
     currents_dict = None
+    cev_currents_dict: Optional[Dict[str, float]] = None
+    cev_event: Optional[str] = None
+    cev_location: Optional[str] = None
     current_warning: Optional[str] = None
     current_source = "N/D"
     if osc_cev:
         try:
-            currents_dict = extract_currents_from_cev_file(osc_cev)
+            cev_data = extract_cev_event_location_and_currents(osc_cev)
+            currents_dict = {
+                "IA": cev_data["IA"],
+                "IB": cev_data["IB"],
+                "IC": cev_data["IC"],
+                "IG": cev_data["IG"],
+            }
+            cev_currents_dict = dict(currents_dict)
+            cev_event = cev_data["EVENT"]
+            cev_location = cev_data["LOCATION"]
             current_source = "CEV"
         except Exception as exc:
             current_warning = f"Aviso: falha ao extrair correntes do CEV ({osc_cev.name}). Detalhe: {exc}"
@@ -905,17 +968,21 @@ def build_data(
             current_warning = f"{current_warning} | {ocr_msg}" if current_warning else ocr_msg
     current_load = format_currents_text(currents_dict) if currents_dict else "N/D"
 
+    fault_event_source = cev_event if cev_event else his_row.event
+    fault_distance = cev_location if cev_location is not None else (his_row.locat if efloc_enabled else "NA")
+    fault_locator = "SIM" if (cev_location is not None or efloc_enabled) else "NA"
+
     expected_time = calculate_expected_time(
         settings=settings,
         protection=protection,
         his_current_primary=his_row.current,
-        osc_currents=currents_dict,
+        cev_currents=cev_currents_dict,
     )
 
     data: Dict[str, Any] = {
         "ied": ied,
         "occurrence_date": datetime.strptime(fault_date, "%Y/%m/%d").strftime("%d/%m/%Y"),
-        "fault_type": infer_fault_type(his_row.event),
+        "fault_type": infer_fault_type(fault_event_source),
         "current_load": current_load,
         "protection": protection,
         "trip_time": trip_time,
@@ -925,7 +992,7 @@ def build_data(
         "actual_time": format_hms_ms(actual_time),
         "expected_time": format_hms_ms(expected_time) if expected_time is not None else "N/D",
         "mechanical_time": format_ms(mechanical_time),
-        "fault_locator": "SIM" if efloc_enabled else "NA",
+        "fault_locator": fault_locator,
         "fault_distance": fault_distance,
         "his_current": f"{his_row.current:.1f} A",
         "his_event": his_row.event,
