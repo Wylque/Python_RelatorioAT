@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
@@ -21,9 +21,9 @@ from pptx.util import Pt
 # CONFIGURACOES DE ENTRADA - EDITE SOMENTE ESTA SECAO
 # =========================================================
 DATA_EVENTO = "01/04/2026"            # DD/MM/AAAA - data base para localizar o evento no HIS/SER
-IED         = "NZA 12M7"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
+IED         = "FAO 12J7"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
 COMENTARIO_BREVE = (
-    "Ocorrencia com curto-circuito MONOFÁSICO e atuacao da funcao 51G1T, "
+    "Ocorrencia com curto-circuito BIFÃSICO-TERRA e atuacao da funcao 50P1T, "
     "seguida de abertura adequada do disjuntor."
 )
 
@@ -31,13 +31,13 @@ COMENTARIO_BREVE = (
 # Parametros manuais para calculo do tempo esperado da funcao 51.
 # Valores em corrente primaria (A). O script aplica fase para 51P* e neutro para 51G*/51N*.
 # =========================================================
-PICKUP_FASE_51P = 402
-CURVA_FASE_51P = "C2"
-DIAL_FASE_51P = "0.20"
+PICKUP_FASE_51P = 510
+CURVA_FASE_51P = "C1"
+DIAL_FASE_51P = "0.05"
 
-PICKUP_NEUTRO_51G = 30
-CURVA_NEUTRO_51G = "C2"
-DIAL_NEUTRO_51G = "0.90"
+PICKUP_NEUTRO_51G = 60
+CURVA_NEUTRO_51G = "C1"
+DIAL_NEUTRO_51G = "0.12"
 
 
 # Pasta raiz do projeto. Se preferir, altere para outro caminho absoluto do Windows.
@@ -235,7 +235,7 @@ def _normalize_ocr_text(text: str) -> str:
     text = text.replace("lG", "IG").replace("1G", "IG")
     text = text.replace("IN:", "IG:")
     text = text.replace("IN ", "IG ")
-    text = text.replace("—", "-").replace("−", "-")
+    text = text.replace("â€”", "-").replace("âˆ’", "-")
     return text
 
 
@@ -614,52 +614,58 @@ def infer_substation_name(ied: str) -> str:
 
 
 
-def build_detailed_analysis(data: Dict[str, Any], ied: str, comentario_breve: str) -> str:
+def build_detailed_analysis_lines(data: Dict[str, Any], ied: str, comentario_breve: str) -> List[str]:
     def tone_for_time(actual_ms: int, mech_ms: int) -> str:
         if actual_ms <= 50 and mech_ms <= 80:
             return (
-                "Os registros indicam atuacao rapida e coerente com a severidade da falta, sem evidencias de demora indevida "
-                "entre a sensibilizacao da protecao e a abertura mecanica do disjuntor."
+                "A atuacao foi rapida e coerente com a severidade da falta."
             )
         if actual_ms <= 150 and mech_ms <= 100:
             return (
-                "Os tempos observados permanecem compativeis com uma resposta adequada da protecao e da cadeia de abertura, "
-                "sem indicios imediatos de degradacao do desempenho do disjuntor."
+                "A atuacao foi adequada para a condicao da falta e dos tempos observados."
             )
         return (
-            "Os tempos observados recomendam avaliacao adicional da coordenacao e da cadeia de abertura, com especial atencao "
-            "aos circuitos de trip, bobina de abertura e condicoes mecanicas do disjuntor."
+            "Os tempos observados recomendam avaliacao adicional da cadeia de abertura e da coordenacao de protecao."
         )
 
     actual_ms = round(data["actual_time_seconds"] * 1000)
     mech_ms = round(data["mechanical_time_seconds"] * 1000)
     expected = data["expected_time"]
     expected_phrase = (
-        f"Para a corrente registrada no HIS ({data['his_current']}), o tempo esperado da funcao atuada foi estimado em {expected}. "
-        if expected != "N/D" else
-        "Nao foi possivel estimar com seguranca o tempo esperado a partir dos ajustes disponiveis, motivo pelo qual o comparativo teorico deve ser tratado como nao disponivel. "
+        f"O tempo esperado da funcao atuada foi estimado em {expected}, para corrente HIS de {data['his_current']}."
+        if expected != "N/D"
+        else "Nao foi possivel estimar o tempo esperado da funcao atuada com os ajustes disponiveis."
     )
     locator_phrase = (
-        f"O localizador de falta estava habilitado e apontou distancia estimada de {data['fault_distance']}, informacao util para correlacao com a rede e com os vestigios de campo. "
-        if data["fault_locator"] == "SIM" else
-        "O localizador de falta nao estava habilitado para esta ocorrencia, nao havendo distancia estimada registrada no relatorio. "
+        f"O localizador de falta indicou distancia estimada de {data['fault_distance']}."
+        if data["fault_locator"] == "SIM"
+        else "Nao houve distancia estimada por localizador de falta para esta ocorrencia."
     )
     reclose_phrase = (
-        "O religamento automatico encontrava-se habilitado nos ajustes do rele. "
-        if data["reclose"].startswith("SIM") else
-        "O religamento automatico nao estava habilitado para esta condicao operacional. "
+        "O religamento automatico estava habilitado."
+        if data["reclose"].startswith("SIM")
+        else "O religamento automatico nao estava habilitado para esta condicao."
     )
 
-    return (
-        f"Na ocorrencia em analise, o IED {ied} registrou um evento do tipo {data['fault_type'].lower()}, com corrente de falta de {data['his_current']} no HIS e atuacao da funcao {data['protection']} as {data['trip_time']}. "
-        f"No SER, observa-se a sensibilizacao inicial em {data['pickup_time']}, resultando em tempo real de atuacao do rele de {data['actual_time']} ({actual_ms} ms). "
-        f"A abertura mecanica do disjuntor foi confirmada em {data['open_time']}, correspondendo a {data['mechanical_time']} ({mech_ms} ms). "
-        f"{expected_phrase}"
-        f"{tone_for_time(actual_ms, mech_ms)} "
-        f"{reclose_phrase}"
-        f"{locator_phrase}"
-        f"Comentario complementar do analista: {comentario_breve.strip()}"
+    summary_line = (
+        f"Na ocorrencia em analise, o IED {ied} registrou evento {data['fault_type'].lower()}, com corrente de falta "
+        f"{data['his_current']} e atuacao da funcao {data['protection']} as {data['trip_time']};"
     )
+    ser_line = (
+        f"No SER, a sensibilizacao inicial ocorreu as {data['pickup_time']}, com tempo real de atuacao de "
+        f"{actual_ms} ms ({data['actual_time']});"
+    )
+    opening_line = (
+        f"A abertura mecanica do disjuntor foi confirmada as {data['open_time']}, com tempo de {mech_ms} ms "
+        f"({data['mechanical_time']});"
+    )
+    operational_line = f"{expected_phrase} {reclose_phrase} {locator_phrase};"
+
+    conclusion_core = tone_for_time(actual_ms, mech_ms)
+    analyst_note = comentario_breve.strip()
+    conclusion_line = f"CONCLUS\u00c3O: {conclusion_core} {analyst_note}".strip()
+
+    return [summary_line, ser_line, opening_line, operational_line, conclusion_line]
 
 
 # =========================================================
@@ -754,6 +760,39 @@ def set_shape_text_with_font(shape, text: str, font_name: str, font_size_pt: flo
     run.font.name = font_name
     run.font.size = Pt(font_size_pt)
     run.font.color.rgb = RGBColor(0, 0, 0)
+
+
+def _set_paragraph_text_with_font(paragraph, text: str, font_name: str, font_size_pt: float) -> None:
+    paragraph.text = text
+    if not paragraph.runs:
+        run = paragraph.add_run()
+        run.text = text
+    for run in paragraph.runs:
+        run.font.name = font_name
+        run.font.size = Pt(font_size_pt)
+        run.font.color.rgb = RGBColor(0, 0, 0)
+
+
+def set_shape_lines_preserving_template(shape, lines: List[str], font_name: str, font_size_pt: float) -> None:
+    if not getattr(shape, "has_text_frame", False):
+        return
+
+    text_frame = shape.text_frame
+    paragraphs = list(text_frame.paragraphs)
+    if not paragraphs:
+        text_frame.clear()
+        paragraphs = [text_frame.paragraphs[0]]
+
+    for idx, line in enumerate(lines):
+        if idx < len(paragraphs):
+            paragraph = paragraphs[idx]
+        else:
+            paragraph = text_frame.add_paragraph()
+            paragraphs.append(paragraph)
+        _set_paragraph_text_with_font(paragraph, line, font_name, font_size_pt)
+
+    for paragraph in paragraphs[len(lines):]:
+        _set_paragraph_text_with_font(paragraph, "", font_name, font_size_pt)
 
 
 def style_table_cells_aptos(table_shape, font_name: str = "Aptos", font_size_pt: float = 11) -> None:
@@ -856,21 +895,21 @@ def update_presentation(template_path: Path, output_path: Path, data: Dict[str, 
 
     # compatibilidade com template acentuado
     for label, value in [
-        ("PROTEÇÃO ATUADA:", data["protection"]),
-        ("HORÁRIO DO DISPARO (RELÉ)", data["trip_time"]),
-        ("RELIGAMENTO AUTOMÁTICO:", data["reclose"]),
-        ("TEMPO DE ATUAÇÃO REAL (RELÉ):", data["actual_time"]),
-        ("TEMPO DE ATUAÇÃO ESPERADO:", data["expected_time"]),
-        ("TEMPO DE RESPOSTA MECÂNICA:", data["mechanical_time"]),
+        ("PROTEÃ‡ÃƒO ATUADA:", data["protection"]),
+        ("HORÃRIO DO DISPARO (RELÃ‰)", data["trip_time"]),
+        ("RELIGAMENTO AUTOMÃTICO:", data["reclose"]),
+        ("TEMPO DE ATUAÃ‡ÃƒO REAL (RELÃ‰):", data["actual_time"]),
+        ("TEMPO DE ATUAÃ‡ÃƒO ESPERADO:", data["expected_time"]),
+        ("TEMPO DE RESPOSTA MECÃ‚NICA:", data["mechanical_time"]),
         ("LOCALIZADOR DE FALTA:", data["fault_locator"]),
-        ("DISTÂNCIA REAL DO DEFEITO:", data["fault_distance"]),
+        ("DISTÃ‚NCIA REAL DO DEFEITO:", data["fault_distance"]),
     ]:
         set_table_value(table_shape, label, value)
     style_table_cells_aptos(table_shape, "Aptos", 11)
 
     comment_shape, image_slot = find_comment_and_image_slots(target_slide)
     if comment_shape is not None:
-        set_shape_text_with_font(comment_shape, data["detailed_commentary"], "Aptos", 11)
+        set_shape_lines_preserving_template(comment_shape, data["detailed_commentary_lines"], "Aptos", 11)
 
     for shape in target_slide.shapes:
         if getattr(shape, "has_text_frame", False):
@@ -1012,7 +1051,9 @@ def build_data(
             "osc_IG": f"{currents_dict['IG']:.2f}",
         })
 
-    data["detailed_commentary"] = build_detailed_analysis(data, ied, comentario_breve)
+    commentary_lines = build_detailed_analysis_lines(data, ied, comentario_breve)
+    data["detailed_commentary_lines"] = commentary_lines
+    data["detailed_commentary"] = "\n".join(commentary_lines)
     return data
 
 
@@ -1063,3 +1104,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
