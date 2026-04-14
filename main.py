@@ -20,24 +20,24 @@ from pptx.util import Pt
 # =========================================================
 # CONFIGURACOES DE ENTRADA - EDITE SOMENTE ESTA SECAO
 # =========================================================
-DATA_EVENTO = "01/04/2026"            # DD/MM/AAAA - data base para localizar o evento no HIS/SER
-IED         = "FAO 12J7"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
+DATA_EVENTO = "10/04/2026"            # DD/MM/AAAA - data base para localizar o evento no HIS/SER
+IED         = "CRT 29T1"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
 COMENTARIO_BREVE = (
-    "Ocorrencia com curto-circuito BIFÃSICO-TERRA e atuacao da funcao 50P1T, "
-    "seguida de abertura adequada do disjuntor."
+    "Ocorrencia com curto-circuito TRIFÁSICO EQUILIBRADO e atuacao da funcao 51PT, "
+    "seguida de abertura adequada do religador, com características de afundamento de tensão."
 )
 
 # =========================================================
 # Parametros manuais para calculo do tempo esperado da funcao 51.
 # Valores em corrente primaria (A). O script aplica fase para 51P* e neutro para 51G*/51N*.
 # =========================================================
-PICKUP_FASE_51P = 510
-CURVA_FASE_51P = "C1"
-DIAL_FASE_51P = "0.05"
+PICKUP_FASE_51P = 130
+CURVA_FASE_51P = "C2"
+DIAL_FASE_51P = "0.10"
 
-PICKUP_NEUTRO_51G = 60
-CURVA_NEUTRO_51G = "C1"
-DIAL_NEUTRO_51G = "0.12"
+PICKUP_NEUTRO_51G = 20
+CURVA_NEUTRO_51G = "C2"
+DIAL_NEUTRO_51G = "0.10"
 
 
 # Pasta raiz do projeto. Se preferir, altere para outro caminho absoluto do Windows.
@@ -45,6 +45,7 @@ PASTA_PROJETO = Path(__file__).resolve().parent
 PASTA_ENTRADA = PASTA_PROJETO / "entrada"
 PASTA_MODELO_PPT = PASTA_PROJETO / "MODELO PPT"
 PASTA_SAIDA_BASE = PASTA_PROJETO / "saida"
+PASTA_ENTRADA_NOME = "CRT 29T1 - 10.04.26"  # Nome da subpasta dentro de 'entrada'. Ex.: "CRT 29T1 - 10.04.26". Use None para busca automatica.
 
 # Se deixar None, o script procurara automaticamente na pasta 'entrada'.
 ARQUIVO_TXT = None                     # Ex.: "PCA 12M1__10.75.39.69__02-04-2026__16-36-22.txt"
@@ -171,27 +172,56 @@ def parse_his(his_text: str) -> List[HisRow]:
             return datetime.strptime(value, "%d/%m/%Y").strftime("%Y/%m/%d")
         return value
 
+    # Formato legado:
+    # IDX REF DATE TIME EVENT LOCAT CURR FREQ TARGETS
+    legacy_re = re.compile(
+        r"^\s*(\d+)\s+(\d+)\s+(\d{4}/\d{2}/\d{2}|\d{2}/\d{2}/\d{4})\s+"
+        r"(\d{2}:\d{2}:\d{2}\.\d{3})\s+(.*?)\s+(\S+)\s+"
+        r"(-?\d+(?:[\.,]\d+)?)\s+(-?\d+(?:[\.,]\d+)?)\s+(\S+)\s*$"
+    )
+    # Formato novo (ex.: CRT 29T1):
+    # IDX DATE TIME EVENT LOCAT CURR FREQ GST TARGET1 TARGET2
+    ext_re = re.compile(
+        r"^\s*(\d+)\s+(\d{4}/\d{2}/\d{2}|\d{2}/\d{2}/\d{4})\s+"
+        r"(\d{2}:\d{2}:\d{2}\.\d{3})\s+(.*?)\s+(\S+)\s+"
+        r"(-?\d+(?:[\.,]\d+)?)\s+(-?\d+(?:[\.,]\d+)?)\s+(\S+)\s+(\S+)\s+(\S+)\s*$"
+    )
+
     rows: List[HisRow] = []
     for line in his_text.splitlines():
         line = line.rstrip()
-        m = re.match(
-            r"^\s*(\d+)\s+(\d+)\s+(\d{4}/\d{2}/\d{2}|\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2}\.\d{3})\s+(.*?)\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(\S+)\s*$",
-            line,
-        )
-        if not m:
+
+        m_legacy = legacy_re.match(line)
+        if m_legacy:
+            idx, ref, date, time, event, locat, current, freq, targets = m_legacy.groups()
+            rows.append(HisRow(
+                idx=int(idx),
+                ref=ref,
+                date=normalize_relay_date(date),
+                time=time,
+                event=event.strip(),
+                locat=locat,
+                current=float(current.replace(",", ".")),
+                freq=float(freq.replace(",", ".")),
+                targets=targets,
+            ))
             continue
-        idx, ref, date, time, event, locat, current, freq, targets = m.groups()
-        rows.append(HisRow(
-            idx=int(idx),
-            ref=ref,
-            date=normalize_relay_date(date),
-            time=time,
-            event=event.strip(),
-            locat=locat,
-            current=float(current),
-            freq=float(freq),
-            targets=targets,
-        ))
+
+        m_ext = ext_re.match(line)
+        if m_ext:
+            idx, date, time, event, locat, current, freq, _gst, target1, target2 = m_ext.groups()
+            rows.append(HisRow(
+                idx=int(idx),
+                ref="",
+                date=normalize_relay_date(date),
+                time=time,
+                event=event.strip(),
+                locat=locat,
+                current=float(current.replace(",", ".")),
+                freq=float(freq.replace(",", ".")),
+                targets=f"{target1} {target2}",
+            ))
+
     if not rows:
         raise ValueError("Nenhuma linha HIS encontrada.")
     return rows
@@ -526,7 +556,15 @@ def ensure_input_folder(folder: Path) -> None:
 
 
 
-def resolve_ied_input_folder(base_folder: Path, ied: str, event_date: str) -> Path:
+def resolve_ied_input_folder(base_folder: Path, ied: str, event_date: str, folder_name: Optional[str] = None) -> Path:
+    if folder_name:
+        candidate = base_folder / folder_name.strip()
+        if not candidate.exists() or not candidate.is_dir():
+            raise FileNotFoundError(
+                f"A pasta configurada em PASTA_ENTRADA_NOME nao foi encontrada em '{base_folder}': {candidate.name}"
+            )
+        return candidate
+
     expected_name = f"{sanitize_filename(ied)} - {datetime.strptime(event_date, '%d/%m/%Y').strftime('%d.%m.%Y')}"
     candidate = base_folder / expected_name
     if candidate.exists() and candidate.is_dir():
@@ -1064,7 +1102,7 @@ def main() -> None:
     PASTA_SAIDA_BASE.mkdir(parents=True, exist_ok=True)
     execution_dt = datetime.now()
 
-    input_folder = resolve_ied_input_folder(PASTA_ENTRADA, IED, DATA_EVENTO)
+    input_folder = resolve_ied_input_folder(PASTA_ENTRADA, IED, DATA_EVENTO, PASTA_ENTRADA_NOME)
 
     txt_path = select_single_file(input_folder, ARQUIVO_TXT, (".txt",))
     template_path = select_single_file(PASTA_MODELO_PPT, ARQUIVO_TEMPLATE_PPTX, (".pptx",))
@@ -1104,4 +1142,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
