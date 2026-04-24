@@ -20,24 +20,23 @@ from pptx.util import Pt
 # =========================================================
 # CONFIGURACOES DE ENTRADA - EDITE SOMENTE ESTA SECAO
 # =========================================================
-DATA_EVENTO = "10/04/2026"            # DD/MM/AAAA - data base para localizar o evento no HIS/SER
-IED         = "CRT 29T1"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
+DATA_EVENTO = "16/04/2026"            # DD/MM/AAAA - data base para localizar o evento no HIS/SER
+IED         = "TBD 12S1"                      # Nome do IED que sera escrito no arquivo de saida e nos textos
 COMENTARIO_BREVE = (
-    "Ocorrencia com curto-circuito TRIFÁSICO EQUILIBRADO e atuacao da funcao 51PT, "
-    "seguida de abertura adequada do religador, com características de afundamento de tensão."
+    "Ocorrência com curto-circuito trifásico e encontrada cruzeta ao solo com cundutor partido"
 )
 
 # =========================================================
 # Parametros manuais para calculo do tempo esperado da funcao 51.
 # Valores em corrente primaria (A). O script aplica fase para 51P* e neutro para 51G*/51N*.
 # =========================================================
-PICKUP_FASE_51P = 130
+PICKUP_FASE_51P = 512
 CURVA_FASE_51P = "C2"
-DIAL_FASE_51P = "0.10"
+DIAL_FASE_51P = "0.20"
 
-PICKUP_NEUTRO_51G = 20
-CURVA_NEUTRO_51G = "C2"
-DIAL_NEUTRO_51G = "0.10"
+PICKUP_NEUTRO_51G = 56
+CURVA_NEUTRO_51G = "C4"
+DIAL_NEUTRO_51G = "0.32"
 
 
 # Pasta raiz do projeto. Se preferir, altere para outro caminho absoluto do Windows.
@@ -45,7 +44,7 @@ PASTA_PROJETO = Path(__file__).resolve().parent
 PASTA_ENTRADA = PASTA_PROJETO / "entrada"
 PASTA_MODELO_PPT = PASTA_PROJETO / "MODELO PPT"
 PASTA_SAIDA_BASE = PASTA_PROJETO / "saida"
-PASTA_ENTRADA_NOME = "CRT 29T1 - 10.04.26"  # Nome da subpasta dentro de 'entrada'. Ex.: "CRT 29T1 - 10.04.26". Use None para busca automatica.
+PASTA_ENTRADA_NOME = "TBD 12S1 - 16.04.26"  # Nome da subpasta dentro de 'entrada'. Ex.: "PAB 12S6 - 31.03.26". Use None para busca automatica.
 
 # Se deixar None, o script procurara automaticamente na pasta 'entrada'.
 ARQUIVO_TXT = None                     # Ex.: "PCA 12M1__10.75.39.69__02-04-2026__16-36-22.txt"
@@ -123,8 +122,14 @@ class SerRow:
 
 
 def extract_section(text: str, name: str) -> str:
+    # Formato padrão (script de coleta): "===== NAME =====\nNAME\n"
     pattern = rf"=+\s*{re.escape(name)}\s*=+\n{name}\n(.*?)(?=\n=>|\n=+\s*[A-Z0-9 ]+\s*=+\n[A-Z0-9 ]+\n|\Z)"
     m = re.search(pattern, text, flags=re.S)
+    if m:
+        return m.group(1)
+    # Formato terminal SEL direto: "=>NAME\n"
+    pattern2 = rf"=>{re.escape(name)}\n(.*?)(?=\n=>|\Z)"
+    m = re.search(pattern2, text, flags=re.S)
     if not m:
         raise ValueError(f"Secao '{name}' nao encontrada no TXT.")
     return m.group(1)
@@ -179,13 +184,8 @@ def parse_his(his_text: str) -> List[HisRow]:
         r"(\d{2}:\d{2}:\d{2}\.\d{3})\s+(.*?)\s+(\S+)\s+"
         r"(-?\d+(?:[\.,]\d+)?)\s+(-?\d+(?:[\.,]\d+)?)\s+(\S+)\s*$"
     )
-    # Formato novo (ex.: CRT 29T1):
-    # IDX DATE TIME EVENT LOCAT CURR FREQ GST TARGET1 TARGET2
-    ext_re = re.compile(
-        r"^\s*(\d+)\s+(\d{4}/\d{2}/\d{2}|\d{2}/\d{2}/\d{4})\s+"
-        r"(\d{2}:\d{2}:\d{2}\.\d{3})\s+(.*?)\s+(\S+)\s+"
-        r"(-?\d+(?:[\.,]\d+)?)\s+(-?\d+(?:[\.,]\d+)?)\s+(\S+)\s+(\S+)\s+(\S+)\s*$"
-    )
+    date_re = re.compile(r"^\d{4}/\d{2}/\d{2}$|^\d{2}/\d{2}/\d{4}$")
+    time_re = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}$")
 
     rows: List[HisRow] = []
     for line in his_text.splitlines():
@@ -207,18 +207,36 @@ def parse_his(his_text: str) -> List[HisRow]:
             ))
             continue
 
-        m_ext = ext_re.match(line)
-        if m_ext:
-            idx, date, time, event, locat, current, freq, _gst, target1, target2 = m_ext.groups()
+        # Formato novo (ex.: 651R):
+        # IDX DATE TIME EVENT... LOCAT CURR FREQ GST RHR TARGET1 TARGET2
+        # Parse da direita para esquerda para suportar EVENT com 1+ tokens (ex.: "AB T").
+        parts = line.split()
+        if len(parts) >= 11 and parts[0].isdigit() and date_re.match(parts[1]) and time_re.match(parts[2]):
+            try:
+                idx = int(parts[0])
+                date = normalize_relay_date(parts[1])
+                time = parts[2]
+                locat = parts[-7]
+                current = float(parts[-6].replace(",", "."))
+                freq = float(parts[-5].replace(",", "."))
+                target1 = parts[-2]
+                target2 = parts[-1]
+                event_tokens = parts[3:-7]
+                if not event_tokens:
+                    continue
+                event = " ".join(event_tokens)
+            except ValueError:
+                continue
+
             rows.append(HisRow(
-                idx=int(idx),
+                idx=idx,
                 ref="",
-                date=normalize_relay_date(date),
+                date=date,
                 time=time,
                 event=event.strip(),
                 locat=locat,
-                current=float(current.replace(",", ".")),
-                freq=float(freq.replace(",", ".")),
+                current=current,
+                freq=freq,
                 targets=f"{target1} {target2}",
             ))
 
@@ -316,30 +334,41 @@ def extract_currents_from_cev_file(cev_path: Path) -> Dict[str, float]:
     with cev_path.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
         rows = list(csv.reader(fh))
 
-    wanted = ("IA(A)", "IB(A)", "IC(A)", "IG(A)")
+    aliases = {
+        "IA": ("IA(A)", "IA"),
+        "IB": ("IB(A)", "IB"),
+        "IC": ("IC(A)", "IC"),
+        "IG": ("IG(A)", "IG", "IN"),
+    }
 
     for idx, row in enumerate(rows):
         header = [cell.strip().upper() for cell in row]
-        if not all(name in header for name in wanted):
+        col_idx: Dict[str, int] = {}
+        for key, names in aliases.items():
+            found = next((i for i, col in enumerate(header) if col in names), None)
+            if found is None:
+                col_idx = {}
+                break
+            col_idx[key] = found
+        if not col_idx:
             continue
 
-        col_idx = {name: header.index(name) for name in wanted}
         for data_row in rows[idx + 1:]:
             if not data_row:
                 continue
             if len(data_row) <= max(col_idx.values()):
                 continue
             try:
-                ia = float(data_row[col_idx["IA(A)"]].strip().replace(",", "."))
-                ib = float(data_row[col_idx["IB(A)"]].strip().replace(",", "."))
-                ic = float(data_row[col_idx["IC(A)"]].strip().replace(",", "."))
-                ig = float(data_row[col_idx["IG(A)"]].strip().replace(",", "."))
+                ia = float(data_row[col_idx["IA"]].strip().replace(",", "."))
+                ib = float(data_row[col_idx["IB"]].strip().replace(",", "."))
+                ic = float(data_row[col_idx["IC"]].strip().replace(",", "."))
+                ig = float(data_row[col_idx["IG"]].strip().replace(",", "."))
                 return {"IA": ia, "IB": ib, "IC": ic, "IG": ig}
             except ValueError:
                 continue
 
     raise ValueError(
-        "Nao foi possivel localizar colunas IA(A), IB(A), IC(A), IG(A) com dados validos no arquivo CEV."
+        "Nao foi possivel localizar colunas IA/IB/IC/IG (ou IA(A)/IB(A)/IC(A)/IG(A)) com dados validos no arquivo CEV."
     )
 
 
@@ -347,24 +376,37 @@ def extract_cev_event_location_and_currents(cev_path: Path) -> Dict[str, Any]:
     with cev_path.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
         rows = list(csv.reader(fh))
 
-    wanted = ("IA(A)", "IB(A)", "IC(A)", "IG(A)", "EVENT", "LOCATION")
+    aliases = {
+        "IA": ("IA(A)", "IA"),
+        "IB": ("IB(A)", "IB"),
+        "IC": ("IC(A)", "IC"),
+        "IG": ("IG(A)", "IG", "IN"),
+        "EVENT": ("EVENT",),
+        "LOCATION": ("LOCATION",),
+    }
 
     for idx, row in enumerate(rows):
         header = [cell.strip().upper() for cell in row]
-        if not all(name in header for name in wanted):
+        col_idx: Dict[str, int] = {}
+        for key, names in aliases.items():
+            found = next((i for i, col in enumerate(header) if col in names), None)
+            if found is None:
+                col_idx = {}
+                break
+            col_idx[key] = found
+        if not col_idx:
             continue
 
-        col_idx = {name: header.index(name) for name in wanted}
         max_idx = max(col_idx.values())
 
         for data_row in rows[idx + 1:]:
             if not data_row or len(data_row) <= max_idx:
                 continue
             try:
-                ia = float(data_row[col_idx["IA(A)"]].strip().replace(",", "."))
-                ib = float(data_row[col_idx["IB(A)"]].strip().replace(",", "."))
-                ic = float(data_row[col_idx["IC(A)"]].strip().replace(",", "."))
-                ig = float(data_row[col_idx["IG(A)"]].strip().replace(",", "."))
+                ia = float(data_row[col_idx["IA"]].strip().replace(",", "."))
+                ib = float(data_row[col_idx["IB"]].strip().replace(",", "."))
+                ic = float(data_row[col_idx["IC"]].strip().replace(",", "."))
+                ig = float(data_row[col_idx["IG"]].strip().replace(",", "."))
             except ValueError:
                 continue
 
@@ -385,7 +427,7 @@ def extract_cev_event_location_and_currents(cev_path: Path) -> Dict[str, Any]:
             }
 
     raise ValueError(
-        "Nao foi possivel localizar colunas IA(A), IB(A), IC(A), IG(A), EVENT e LOCATION com dados validos no arquivo CEV."
+        "Nao foi possivel localizar colunas de correntes (IA/IB/IC/IG), EVENT e LOCATION com dados validos no arquivo CEV."
     )
 
 
@@ -462,11 +504,60 @@ def pick_trip_element(ser_rows: List[SerRow], fault_date: str, trip_time: str) -
 def find_previous_asserted(ser_rows: List[SerRow], fault_date: str, before_dt: datetime, element: str) -> Optional[SerRow]:
     items = []
     for row in ser_rows:
-        if row.date == fault_date and row.element == element and row.state == "Asserted":
-            dt = parse_dt(row.date, row.time)
-            if dt <= before_dt:
-                items.append((dt, row))
+        if row.date != fault_date or row.element != element:
+            continue
+        if row.state.lower() not in {"asserted", "atuado"}:
+            continue
+        dt = parse_dt(row.date, row.time)
+        if dt <= before_dt:
+            items.append((dt, row))
     return max(items, default=(None, None), key=lambda x: x[0])[1] if items else None
+
+
+def find_first_asserted_before(
+    ser_rows: List[SerRow],
+    fault_date: str,
+    before_dt: datetime,
+    elements: Tuple[str, ...],
+    lookback_seconds: Optional[float] = None,
+) -> Optional[SerRow]:
+    items = []
+    min_dt = None
+    if lookback_seconds is not None:
+        min_dt = before_dt.timestamp() - lookback_seconds
+
+    for row in ser_rows:
+        if row.date != fault_date or row.element not in elements:
+            continue
+        if row.state.lower() not in {"asserted", "atuado"}:
+            continue
+        dt = parse_dt(row.date, row.time)
+        if dt > before_dt:
+            continue
+        if min_dt is not None and dt.timestamp() < min_dt:
+            continue
+        items.append((dt, row))
+    return min(items, default=(None, None), key=lambda x: x[0])[1] if items else None
+
+
+def find_first_after_state(
+    ser_rows: List[SerRow],
+    fault_date: str,
+    after_dt: datetime,
+    element: str,
+    states: Tuple[str, ...],
+) -> Optional[SerRow]:
+    states_norm = {s.lower() for s in states}
+    items = []
+    for row in ser_rows:
+        if row.date != fault_date or row.element != element:
+            continue
+        if row.state.lower() not in states_norm:
+            continue
+        dt = parse_dt(row.date, row.time)
+        if dt >= after_dt:
+            items.append((dt, row))
+    return min(items, default=(None, None), key=lambda x: x[0])[1] if items else None
 
 
 
@@ -984,7 +1075,7 @@ def build_data(
     his_rows = parse_his(his_text)
 
     occ = datetime.strptime(occurrence_date, "%d/%m/%Y").strftime("%Y/%m/%d")
-    matches = [r for r in his_rows if r.date == occ]
+    matches = [r for r in his_rows if r.date == occ and "ER Trigger" not in r.event]
     if not matches:
         raise ValueError(f"Nenhum evento HIS encontrado para {occurrence_date}.")
     his_row = matches[0]
@@ -992,21 +1083,67 @@ def build_data(
     fault_date = his_row.date
     trip_time = his_row.time
     protection = pick_trip_element(ser_rows, fault_date, trip_time)
-    pickup_element = normalize_protection_pick_base(protection) + "P"
-
     trip_dt = parse_dt(fault_date, trip_time)
-    pickup_row = find_previous_asserted(ser_rows, fault_date, trip_dt, pickup_element)
-    if not pickup_row:
-        raise ValueError(f"Pickup inicial '{pickup_element}' nao encontrado no SER.")
-    pickup_dt = parse_dt(pickup_row.date, pickup_row.time)
+    is_model_651r = bool(re.search(r"651R", text))
 
-    open_row = find_first_after(ser_rows, fault_date, trip_dt, "DISJUNTOR", "ABERTO")
-    if not open_row:
-        raise ValueError("Evento 'DISJUNTOR ABERTO' nao encontrado apos o trip.")
-    open_dt = parse_dt(open_row.date, open_row.time)
+    if is_model_651r:
+        # 651R:
+        # - Tempo de atuacao real: trip_element Asserted - pickup Asserted (inicial)
+        # - Tempo de resposta mecanica: 52A3P Deasserted - trip_element Asserted (inicial)
+        if protection == "51PT":
+            pickup_elements = ("51A", "51B", "51C")
+        else:
+            # ex.: 51G1T → pickup e 51G1 (sem "P", diferente do SEL-751)
+            pickup_elements = (normalize_protection_pick_base(protection),)
+
+        pickup_row = find_first_asserted_before(
+            ser_rows=ser_rows,
+            fault_date=fault_date,
+            before_dt=trip_dt,
+            elements=pickup_elements,
+            lookback_seconds=60.0,
+        )
+        if not pickup_row:
+            raise ValueError(f"Pickup inicial ({'/'.join(pickup_elements)} Asserted) nao encontrado no SER para o modelo 651R.")
+        pickup_dt = parse_dt(pickup_row.date, pickup_row.time)
+
+        trip_start_row = find_first_asserted_before(
+            ser_rows=ser_rows,
+            fault_date=fault_date,
+            before_dt=trip_dt,
+            elements=(protection,),
+            lookback_seconds=60.0,
+        ) or find_previous_asserted(ser_rows, fault_date, trip_dt, protection)
+        if not trip_start_row:
+            raise ValueError(f"{protection} Asserted (inicial) nao encontrado no SER para o modelo 651R.")
+        trip_start_dt = parse_dt(trip_start_row.date, trip_start_row.time)
+
+        open_row = find_first_after_state(
+            ser_rows=ser_rows,
+            fault_date=fault_date,
+            after_dt=trip_start_dt,
+            element="52A3P",
+            states=("Deasserted",),
+        )
+        if not open_row:
+            raise ValueError(f"Evento '52A3P Deasserted' nao encontrado apos {protection} Asserted (inicial).")
+        open_dt = parse_dt(open_row.date, open_row.time)
+    else:
+        # 751 (regra anterior)
+        pickup_element = normalize_protection_pick_base(protection) + "P"
+        pickup_row = find_previous_asserted(ser_rows, fault_date, trip_dt, pickup_element)
+        if not pickup_row:
+            raise ValueError(f"Pickup inicial '{pickup_element}' nao encontrado no SER.")
+        pickup_dt = parse_dt(pickup_row.date, pickup_row.time)
+
+        trip_start_dt = trip_dt
+        open_row = find_first_after(ser_rows, fault_date, trip_dt, "DISJUNTOR", "ABERTO")
+        if not open_row:
+            raise ValueError("Evento 'DISJUNTOR ABERTO' nao encontrado apos o trip.")
+        open_dt = parse_dt(open_row.date, open_row.time)
 
     actual_time = (trip_dt - pickup_dt).total_seconds()
-    mechanical_time = (open_dt - trip_dt).total_seconds()
+    mechanical_time = (open_dt - trip_start_dt).total_seconds()
 
     reclose = "SIM" if settings.get("E79", "OFF") != "OFF" else "NA (SEM RELIGAMENTO)"
     efloc_enabled = settings.get("EFLOC", "N") == "Y"
